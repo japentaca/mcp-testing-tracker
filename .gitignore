@@ -128,6 +128,8 @@ node_modules/
 
 # Database files
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 database.db

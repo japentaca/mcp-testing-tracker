@@ -2,36 +2,57 @@ import sqlite3 from 'sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync } from 'fs';
+import config from './config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+const isTestMode = process.env.NODE_ENV === 'test';
+
 class Database {
-  constructor(dbPath = 'tests.db') {
+  constructor(dbPath = config.database.path) {
     this.dbPath = dbPath;
     this.db = null;
-    this.init();
+    this.ready = this.init();
   }
 
-  init() {
-    this.db = new sqlite3.Database(this.dbPath, (err) => {
-      if (err) {
-        console.error('Error opening database:', err.message);
-        throw err;
-      }
-      console.log('Connected to SQLite database');
-    });
+  async init() {
+    return new Promise((resolve, reject) => {
+      this.db = new sqlite3.Database(this.dbPath, async (err) => {
+        if (err) {
+          console.error('Error opening database:', err.message);
+          reject(err);
+          return;
+        }
+        if (!isTestMode) console.log('Connected to SQLite database');
 
-    // Load and execute schema
-    const schemaPath = join(__dirname, 'schema.sql');
-    const schema = readFileSync(schemaPath, 'utf8');
+        try {
+          // Enable foreign keys
+          await this.run('PRAGMA foreign_keys = ON');
+          if (!isTestMode) console.log('Foreign keys enabled');
 
-    this.db.exec(schema, (err) => {
-      if (err) {
-        console.error('Error creating schema:', err.message);
-        throw err;
-      }
-      console.log('Database schema initialized');
+          // Enable WAL mode for better concurrency
+          await this.run('PRAGMA journal_mode = WAL');
+          if (!isTestMode) console.log('WAL mode enabled');
+
+          // Load and execute schema
+          const schemaPath = join(__dirname, 'schema.sql');
+          const schema = readFileSync(schemaPath, 'utf8');
+
+          this.db.exec(schema, (err) => {
+            if (err) {
+              console.error('Error creating schema:', err.message);
+              reject(err);
+              return;
+            }
+            if (!isTestMode) console.log('Database schema initialized');
+            resolve();
+          });
+        } catch (error) {
+          console.error('Error during database initialization:', error.message);
+          reject(error);
+        }
+      });
     });
   }
 
@@ -100,6 +121,30 @@ class Database {
   async getTestSuite(id) {
     const sql = 'SELECT * FROM test_suites WHERE id = ?';
     return await this.get(sql, [id]);
+  }
+
+  async updateTestSuite(id, updates = {}) {
+    const allowedFields = ['name', 'project', 'description'];
+    const setClause = [];
+    const params = [];
+
+    for (const [field, value] of Object.entries(updates)) {
+      if (allowedFields.includes(field)) {
+        setClause.push(`${field} = ?`);
+        params.push(value);
+      }
+    }
+
+    if (setClause.length === 0) {
+      throw new Error('No valid fields to update');
+    }
+
+    setClause.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(id);
+
+    const sql = `UPDATE test_suites SET ${setClause.join(', ')} WHERE id = ?`;
+    const result = await this.run(sql, params);
+    return result.changes > 0;
   }
 
   async deleteTestSuite(id) {

@@ -5,17 +5,36 @@ import Database from './database.js';
 class MCPServer {
   constructor() {
     this.db = new Database();
+    this.inputBuffer = '';
+    this.init();
+  }
+
+  async init() {
+    // Wait for database to be ready
+    await this.db.ready;
     this.setupMessageHandling();
   }
 
   setupMessageHandling() {
-    process.stdin.on('data', async (data) => {
+    process.stdin.on('data', async (chunk) => {
       try {
-        const message = JSON.parse(data.toString().trim());
-        const response = await this.handleMessage(message);
-        this.sendResponse(response);
+        // Accumulate chunks into buffer
+        this.inputBuffer += chunk.toString();
+
+        // Process complete lines (messages are newline-delimited)
+        let newlineIndex;
+        while ((newlineIndex = this.inputBuffer.indexOf('\n')) !== -1) {
+          const line = this.inputBuffer.slice(0, newlineIndex).trim();
+          this.inputBuffer = this.inputBuffer.slice(newlineIndex + 1);
+
+          if (line) {
+            const message = JSON.parse(line);
+            const response = await this.handleMessage(message);
+            this.sendResponse(response);
+          }
+        }
       } catch (error) {
-        this.sendError(error.message);
+        this.sendError(error.message, null);
       }
     });
   }
@@ -252,9 +271,45 @@ class MCPServer {
     }
   }
 
+  // Input validation helpers
+  validateStatus(status) {
+    const validStatuses = ['pending', 'passed', 'failed', 'blocked', 'skipped'];
+    if (status && !validStatuses.includes(status)) {
+      throw new Error(`Invalid status: ${status}. Must be one of: ${validStatuses.join(', ')}`);
+    }
+  }
+
+  validatePriority(priority) {
+    const validPriorities = ['low', 'medium', 'high', 'critical'];
+    if (priority && !validPriorities.includes(priority)) {
+      throw new Error(`Invalid priority: ${priority}. Must be one of: ${validPriorities.join(', ')}`);
+    }
+  }
+
+  validateId(id, fieldName = 'ID') {
+    if (typeof id !== 'number' || id <= 0 || !Number.isInteger(id)) {
+      throw new Error(`Invalid ${fieldName}: must be a positive integer`);
+    }
+  }
+
+  validateString(value, fieldName, required = true) {
+    if (required && (!value || typeof value !== 'string' || value.trim() === '')) {
+      throw new Error(`${fieldName} is required and must be a non-empty string`);
+    }
+    if (!required && value !== undefined && value !== null && typeof value !== 'string') {
+      throw new Error(`${fieldName} must be a string`);
+    }
+  }
+
   // Tool implementations
   async createTestSuite(args) {
     const { name, project, description } = args;
+    
+    // Validate inputs
+    this.validateString(name, 'Name', true);
+    this.validateString(project, 'Project', false);
+    this.validateString(description, 'Description', false);
+
     const id = await this.db.createTestSuite(name, project, description);
     return {
       success: true,
@@ -265,12 +320,22 @@ class MCPServer {
 
   async listTestSuites(args) {
     const { project } = args;
+    
+    // Validate inputs
+    this.validateString(project, 'Project', false);
+
     const suites = await this.db.getTestSuites(project);
     return { suites };
   }
 
   async addTestCase(args) {
     const { suite_id, description, priority = 'medium', category } = args;
+
+    // Validate inputs
+    this.validateId(suite_id, 'Suite ID');
+    this.validateString(description, 'Description', true);
+    this.validatePriority(priority);
+    this.validateString(category, 'Category', false);
 
     // Verify suite exists
     const suite = await this.db.getTestSuite(suite_id);
@@ -287,7 +352,23 @@ class MCPServer {
   }
 
   async updateTestCase(args) {
-    const { id, ...updates } = args;
+    const { id, status, notes, priority, category, description } = args;
+
+    // Validate inputs
+    this.validateId(id, 'Case ID');
+    this.validateStatus(status);
+    this.validatePriority(priority);
+    this.validateString(notes, 'Notes', false);
+    this.validateString(category, 'Category', false);
+    this.validateString(description, 'Description', false);
+
+    const updates = {};
+    if (status !== undefined) updates.status = status;
+    if (notes !== undefined) updates.notes = notes;
+    if (priority !== undefined) updates.priority = priority;
+    if (category !== undefined) updates.category = category;
+    if (description !== undefined) updates.description = description;
+
     const success = await this.db.updateTestCase(id, updates);
 
     if (!success) {
@@ -301,12 +382,24 @@ class MCPServer {
   }
 
   async getTestCases(args) {
+    const { suite_id, status, priority, category, search } = args;
+
+    // Validate inputs
+    if (suite_id !== undefined) this.validateId(suite_id, 'Suite ID');
+    this.validateStatus(status);
+    this.validatePriority(priority);
+    this.validateString(category, 'Category', false);
+    this.validateString(search, 'Search', false);
+
     const cases = await this.db.getTestCases(args);
     return { test_cases: cases };
   }
 
   async getTestSummary(args) {
     const { suite_id } = args;
+
+    // Validate inputs
+    this.validateId(suite_id, 'Suite ID');
 
     // Verify suite exists
     const suite = await this.db.getTestSuite(suite_id);
@@ -324,6 +417,10 @@ class MCPServer {
 
   async deleteTestCase(args) {
     const { id } = args;
+
+    // Validate inputs
+    this.validateId(id, 'Case ID');
+
     const success = await this.db.deleteTestCase(id);
 
     if (!success) {
@@ -338,6 +435,9 @@ class MCPServer {
 
   async deleteTestSuite(args) {
     const { id } = args;
+
+    // Validate inputs
+    this.validateId(id, 'Suite ID');
 
     // Verify suite exists
     const suite = await this.db.getTestSuite(id);
@@ -356,9 +456,10 @@ class MCPServer {
     process.stdout.write(JSON.stringify(response) + '\n');
   }
 
-  sendError(message) {
+  sendError(message, id = null) {
     const error = {
       jsonrpc: '2.0',
+      id,
       error: {
         code: -32000,
         message
@@ -369,16 +470,24 @@ class MCPServer {
 }
 
 // Handle process termination
+let server;
+
 process.on('SIGINT', async () => {
   console.error('Shutting down MCP server...');
+  if (server && server.db) {
+    await server.db.close();
+  }
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   console.error('Shutting down MCP server...');
+  if (server && server.db) {
+    await server.db.close();
+  }
   process.exit(0);
 });
 
 // Start the MCP server
-const server = new MCPServer();
+server = new MCPServer();
 console.error('MCP Testing Server started');
