@@ -121,7 +121,14 @@ async function runSmokeTest() {
     await client.start();
 
     console.log('Checking initialize...');
-    const initResponse = await client.call('initialize', {});
+    const initResponse = await client.call('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: {
+        name: 'mcp-smoke-test',
+        version: '1.0.0'
+      }
+    });
     assert(!initResponse.error, `initialize failed: ${initResponse.error?.message}`);
     assert(initResponse.result?.serverInfo?.name === 'mcp-project-tracker', 'Unexpected serverInfo.name');
 
@@ -134,12 +141,17 @@ async function runSmokeTest() {
     const expectedTools = [
       'create_project',
       'list_projects',
+      'delete_project',
       'add_task',
       'update_task',
       'get_tasks',
-      'get_project_summary',
+      'get_task_by_id',
       'delete_task',
-      'delete_project'
+      'get_project_summary',
+      'add_dependency',
+      'remove_dependency',
+      'get_blocked_tasks',
+      'get_next_actionable'
     ];
 
     for (const toolName of expectedTools) {
@@ -156,33 +168,71 @@ async function runSmokeTest() {
     const projectId = createProject.project_id;
     assert(Number.isInteger(projectId) && projectId > 0, 'Invalid project_id from create_project');
 
-    console.log('Adding task...');
-    const addTask = await client.callTool('add_task', {
+    console.log('Adding tasks...');
+    const foundationTask = await client.callTool('add_task', {
       project_id: projectId,
+      title: 'Foundation',
+      description: 'Prepare baseline',
+      priority: 'critical',
+      category: 'setup',
+      assignee: 'copilot',
+      due_date: '2026-12-31',
+      tags: ['base']
+    });
+    assert(foundationTask.success === true, 'foundation add_task failed');
+    const foundationTaskId = foundationTask.task_id;
+
+    const integrationTask = await client.callTool('add_task', {
+      project_id: projectId,
+      title: 'Integration',
       description: 'Validate MCP end-to-end',
       priority: 'high',
       category: 'integration',
       assignee: 'copilot',
-      due_date: '2026-12-31'
+      due_date: '2026-12-31',
+      tags: ['mcp', 'smoke']
     });
-    assert(addTask.success === true, 'add_task did not return success=true');
-    const taskId = addTask.task_id;
+    assert(integrationTask.success === true, 'integration add_task failed');
+    const taskId = integrationTask.task_id;
     assert(Number.isInteger(taskId) && taskId > 0, 'Invalid task_id from add_task');
+
+    console.log('Adding dependency...');
+    const addDependency = await client.callTool('add_dependency', {
+      task_id: taskId,
+      depends_on_task_id: foundationTaskId
+    });
+    assert(addDependency.success === true, 'add_dependency did not return success=true');
+
+    console.log('Checking blocked tasks...');
+    const blocked = await client.callTool('get_blocked_tasks', { project_id: projectId });
+    assert(Array.isArray(blocked.tasks), 'get_blocked_tasks did not return tasks');
+    assert(blocked.tasks.some((task) => task.id === taskId), 'Dependent task should be blocked');
 
     console.log('Updating task...');
     const updateTask = await client.callTool('update_task', {
-      id: taskId,
-      status: 'in-progress',
-      notes: 'smoke updated'
+      id: foundationTaskId,
+      status: 'tested',
+      notes: 'dependency resolved'
     });
     assert(updateTask.success === true, 'update_task did not return success=true');
+
+    console.log('Checking actionable tasks...');
+    const actionable = await client.callTool('get_next_actionable', { project_id: projectId });
+    assert(Array.isArray(actionable.tasks), 'get_next_actionable did not return tasks');
+    assert(actionable.tasks.some((task) => task.id === taskId), 'Integration task should become actionable');
 
     console.log('Fetching tasks...');
     const getTasks = await client.callTool('get_tasks', {
       project_id: projectId
     });
     assert(Array.isArray(getTasks.tasks), 'get_tasks did not return tasks array');
-    assert(getTasks.tasks.some((task) => task.id === taskId), 'Created task not found in get_tasks');
+    assert(getTasks.tasks.some((task) => task.id === taskId), 'Created integration task not found in get_tasks');
+
+    console.log('Fetching task detail...');
+    const taskDetail = await client.callTool('get_task_by_id', { id: taskId });
+    assert(taskDetail.id === taskId, 'get_task_by_id returned wrong task');
+    assert(Array.isArray(taskDetail.history), 'Task detail should include history');
+    assert(Array.isArray(taskDetail.dependencies), 'Task detail should include dependencies');
 
     console.log('Fetching summary...');
     const summary = await client.callTool('get_project_summary', {
@@ -190,10 +240,13 @@ async function runSmokeTest() {
     });
     assert(summary.project_id === projectId, 'Summary project_id mismatch');
     assert(summary.summary?.total >= 1, 'Summary total should be >= 1');
+    assert(summary.summary?.dependency_stats, 'Summary should include dependency_stats');
 
-    console.log('Deleting task...');
+    console.log('Deleting tasks...');
     const deleteTask = await client.callTool('delete_task', { id: taskId });
+    const deleteTask2 = await client.callTool('delete_task', { id: foundationTaskId });
     assert(deleteTask.success === true, 'delete_task did not return success=true');
+    assert(deleteTask2.success === true, 'delete_task foundation did not return success=true');
 
     console.log('Deleting project...');
     const deleteProject = await client.callTool('delete_project', { id: projectId });

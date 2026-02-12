@@ -1,507 +1,421 @@
 #!/usr/bin/env node
 
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import Database from './database.js';
 
-class MCPServer {
-  constructor() {
-    this.db = new Database();
-    this.inputBuffer = '';
-    this.init();
-  }
+const VALID_STATUSES = ['pending', 'in-progress', 'developed', 'tested', 'deployed', 'blocked'];
+const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
 
-  async init() {
-    // Wait for database to be ready
-    await this.db.ready;
-    this.setupMessageHandling();
-  }
+const db = new Database();
+await db.ready;
 
-  setupMessageHandling() {
-    process.stdin.on('data', async (chunk) => {
-      try {
-        // Accumulate chunks into buffer
-        this.inputBuffer += chunk.toString();
+const server = new Server(
+  { name: 'mcp-project-tracker', version: '3.0.0' },
+  { capabilities: { tools: {} } }
+);
 
-        // Process complete lines (messages are newline-delimited)
-        let newlineIndex;
-        while ((newlineIndex = this.inputBuffer.indexOf('\n')) !== -1) {
-          const line = this.inputBuffer.slice(0, newlineIndex).trim();
-          this.inputBuffer = this.inputBuffer.slice(newlineIndex + 1);
-
-          if (line) {
-            const message = JSON.parse(line);
-            const response = await this.handleMessage(message);
-            this.sendResponse(response);
-          }
-        }
-      } catch (error) {
-        this.sendError(error.message, null);
-      }
-    });
-  }
-
-  async handleMessage(message) {
-    const { method, params = {}, id } = message;
-
-    switch (method) {
-      case 'initialize':
-        return this.handleInitialize(id);
-
-      case 'tools/list':
-        return this.handleToolsList(id);
-
-      case 'tools/call':
-        return await this.handleToolCall(params, id);
-
-      default:
-        throw new Error(`Unknown method: ${method}`);
-    }
-  }
-
-  handleInitialize(id) {
-    return {
-      jsonrpc: '2.0',
-      id,
-      result: {
-        protocolVersion: '2024-11-05',
-        capabilities: {
-          tools: {}
-        },
-        serverInfo: {
-          name: 'mcp-project-tracker',
-          version: '1.0.0'
-        }
-      }
-    };
-  }
-
-  handleToolsList(id) {
-    const tools = [
-      {
-        name: 'create_project',
-        description: 'Create a new project',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Project name' },
-            client: { type: 'string', description: 'Client name (optional)' },
-            description: { type: 'string', description: 'Project description (optional)' }
-          },
-          required: ['name']
-        }
-      },
-      {
-        name: 'list_projects',
-        description: 'List all projects with metadata and counts',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            client: { type: 'string', description: 'Filter by client name (optional)' }
-          }
-        }
-      },
-      {
-        name: 'add_task',
-        description: 'Add a new task to a project',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            project_id: { type: 'number', description: 'ID of the project' },
-            description: { type: 'string', description: 'Task description' },
-            priority: {
-              type: 'string',
-              enum: ['low', 'medium', 'high', 'critical'],
-              description: 'Task priority'
-            },
-            category: { type: 'string', description: 'Task category (optional)' },
-            assignee: { type: 'string', description: 'Task assignee (optional)' },
-            due_date: { type: 'string', description: 'Due date (YYYY-MM-DD, optional)' }
-          },
-          required: ['project_id', 'description']
-        }
-      },
-      {
-        name: 'update_task',
-        description: 'Update an existing task',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'Task ID' },
-            status: {
-              type: 'string',
-              enum: ['pending', 'in-progress', 'developed', 'tested', 'deployed', 'blocked'],
-              description: 'Task status'
-            },
-            notes: { type: 'string', description: 'Task notes (optional)' },
-            priority: {
-              type: 'string',
-              enum: ['low', 'medium', 'high', 'critical'],
-              description: 'Task priority (optional)'
-            },
-            category: { type: 'string', description: 'Task category (optional)' },
-            description: { type: 'string', description: 'Task description (optional)' },
-            assignee: { type: 'string', description: 'Task assignee (optional)' },
-            due_date: { type: 'string', description: 'Due date (YYYY-MM-DD, optional)' }
-          },
-          required: ['id']
-        }
-      },
-      {
-        name: 'get_tasks',
-        description: 'Get filtered tasks',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            project_id: { type: 'number', description: 'Filter by project ID (optional)' },
-            status: {
-              type: 'string',
-              enum: ['pending', 'in-progress', 'developed', 'tested', 'deployed', 'blocked'],
-              description: 'Filter by status (optional)'
-            },
-            priority: {
-              type: 'string',
-              enum: ['low', 'medium', 'high', 'critical'],
-              description: 'Filter by priority (optional)'
-            },
-            category: { type: 'string', description: 'Filter by category (optional)' },
-            assignee: { type: 'string', description: 'Filter by assignee (optional)' },
-            search: { type: 'string', description: 'Search in description and notes (optional)' }
-          }
-        }
-      },
-      {
-        name: 'get_project_summary',
-        description: 'Get summary statistics for a project',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            project_id: { type: 'number', description: 'Project ID' }
-          },
-          required: ['project_id']
-        }
-      },
-      {
-        name: 'delete_task',
-        description: 'Delete a task',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'Task ID to delete' }
-          },
-          required: ['id']
-        }
-      },
-      {
-        name: 'delete_project',
-        description: 'Delete a project and all its tasks',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'number', description: 'Project ID to delete' }
-          },
-          required: ['id']
-        }
-      }
-    ];
-
-    return {
-      jsonrpc: '2.0',
-      id,
-      result: { tools }
-    };
-  }
-
-  async handleToolCall(params, id) {
-    const { name, arguments: args } = params;
-
-    try {
-      let result;
-
-      switch (name) {
-        case 'create_project':
-          result = await this.createProject(args);
-          break;
-
-        case 'list_projects':
-          result = await this.listProjects(args);
-          break;
-
-        case 'add_task':
-          result = await this.addTask(args);
-          break;
-
-        case 'update_task':
-          result = await this.updateTask(args);
-          break;
-
-        case 'get_tasks':
-          result = await this.getTasks(args);
-          break;
-
-        case 'get_project_summary':
-          result = await this.getProjectSummary(args);
-          break;
-
-        case 'delete_task':
-          result = await this.deleteTask(args);
-          break;
-
-        case 'delete_project':
-          result = await this.deleteProject(args);
-          break;
-
-        default:
-          throw new Error(`Unknown tool: ${name}`);
-      }
-
-      return {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2)
-            }
-          ]
-        }
-      };
-
-    } catch (error) {
-      return {
-        jsonrpc: '2.0',
-        id,
-        error: {
-          code: -32000,
-          message: error.message
-        }
-      };
-    }
-  }
-
-  // Input validation helpers
-  validateStatus(status) {
-    const validStatuses = ['pending', 'in-progress', 'developed', 'tested', 'deployed', 'blocked'];
-    if (status && !validStatuses.includes(status)) {
-      throw new Error(`Invalid status: ${status}. Must be one of: ${validStatuses.join(', ')}`);
-    }
-  }
-
-  validatePriority(priority) {
-    const validPriorities = ['low', 'medium', 'high', 'critical'];
-    if (priority && !validPriorities.includes(priority)) {
-      throw new Error(`Invalid priority: ${priority}. Must be one of: ${validPriorities.join(', ')}`);
-    }
-  }
-
-  validateId(id, fieldName = 'ID') {
-    if (typeof id !== 'number' || id <= 0 || !Number.isInteger(id)) {
-      throw new Error(`Invalid ${fieldName}: must be a positive integer`);
-    }
-  }
-
-  validateString(value, fieldName, required = true) {
-    if (required && (!value || typeof value !== 'string' || value.trim() === '')) {
-      throw new Error(`${fieldName} is required and must be a non-empty string`);
-    }
-    if (!required && value !== undefined && value !== null && typeof value !== 'string') {
-      throw new Error(`${fieldName} must be a string`);
-    }
-  }
-
-  // Tool implementations
-  async createProject(args) {
-    const { name, client, description } = args;
-
-    // Validate inputs
-    this.validateString(name, 'Name', true);
-    this.validateString(client, 'Client', false);
-    this.validateString(description, 'Description', false);
-
-    const id = await this.db.createProject(name, client, description);
-    return {
-      success: true,
-      project_id: id,
-      message: `Project "${name}" created with ID ${id}`
-    };
-  }
-
-  async listProjects(args) {
-    const { client } = args;
-
-    // Validate inputs
-    this.validateString(client, 'Client', false);
-
-    const projects = await this.db.getProjects(client);
-    return { projects };
-  }
-
-  async addTask(args) {
-    const { project_id, description, priority = 'medium', category, assignee, due_date } = args;
-
-    // Validate inputs
-    this.validateId(project_id, 'Project ID');
-    this.validateString(description, 'Description', true);
-    this.validatePriority(priority);
-    this.validateString(category, 'Category', false);
-    this.validateString(assignee, 'Assignee', false);
-    this.validateString(due_date, 'Due date', false);
-
-    // Verify project exists
-    const project = await this.db.getProject(project_id);
-    if (!project) {
-      throw new Error(`Project with ID ${project_id} not found`);
-    }
-
-    const id = await this.db.addTask(project_id, description, priority, category, assignee, due_date);
-    return {
-      success: true,
-      task_id: id,
-      message: `Task added with ID ${id} to project "${project.name}"`
-    };
-  }
-
-  async updateTask(args) {
-    const { id, status, notes, priority, category, description, assignee, due_date } = args;
-
-    // Validate inputs
-    this.validateId(id, 'Case ID');
-    this.validateStatus(status);
-    this.validatePriority(priority);
-    this.validateString(notes, 'Notes', false);
-    this.validateString(category, 'Category', false);
-    this.validateString(description, 'Description', false);
-    this.validateString(assignee, 'Assignee', false);
-    this.validateString(due_date, 'Due date', false);
-
-    const updates = {};
-    if (status !== undefined) updates.status = status;
-    if (notes !== undefined) updates.notes = notes;
-    if (priority !== undefined) updates.priority = priority;
-    if (category !== undefined) updates.category = category;
-    if (description !== undefined) updates.description = description;
-    if (assignee !== undefined) updates.assignee = assignee;
-    if (due_date !== undefined) updates.due_date = due_date;
-
-    const success = await this.db.updateTask(id, updates);
-
-    if (!success) {
-      throw new Error(`Task with ID ${id} not found`);
-    }
-
-    return {
-      success: true,
-      message: `Task ${id} updated successfully`
-    };
-  }
-
-  async getTasks(args) {
-    const { project_id, status, priority, category, assignee, search } = args;
-
-    // Validate inputs
-    if (project_id !== undefined) this.validateId(project_id, 'Project ID');
-    this.validateStatus(status);
-    this.validatePriority(priority);
-    this.validateString(category, 'Category', false);
-    this.validateString(assignee, 'Assignee', false);
-    this.validateString(search, 'Search', false);
-
-    const tasks = await this.db.getTasks(args);
-    return { tasks };
-  }
-
-  async getProjectSummary(args) {
-    const { project_id } = args;
-
-    // Validate inputs
-    this.validateId(project_id, 'Project ID');
-
-    // Verify project exists
-    const project = await this.db.getProject(project_id);
-    if (!project) {
-      throw new Error(`Project with ID ${project_id} not found`);
-    }
-
-    const summary = await this.db.getProjectSummary(project_id);
-    return {
-      project_name: project.name,
-      project_id,
-      summary
-    };
-  }
-
-  async deleteTask(args) {
-    const { id } = args;
-
-    // Validate inputs
-    this.validateId(id, 'Task ID');
-
-    const success = await this.db.deleteTask(id);
-
-    if (!success) {
-      throw new Error(`Task with ID ${id} not found`);
-    }
-
-    return {
-      success: true,
-      message: `Task ${id} deleted successfully`
-    };
-  }
-
-  async deleteProject(args) {
-    const { id } = args;
-
-    // Validate inputs
-    this.validateId(id, 'Project ID');
-
-    // Verify project exists
-    const project = await this.db.getProject(id);
-    if (!project) {
-      throw new Error(`Project with ID ${id} not found`);
-    }
-
-    const success = await this.db.deleteProject(id);
-    return {
-      success: true,
-      message: `Project "${project.name}" and all its tasks deleted successfully`
-    };
-  }
-
-  sendResponse(response) {
-    process.stdout.write(JSON.stringify(response) + '\n');
-  }
-
-  sendError(message, id = null) {
-    const error = {
-      jsonrpc: '2.0',
-      id,
-      error: {
-        code: -32000,
-        message
-      }
-    };
-    process.stdout.write(JSON.stringify(error) + '\n');
+function validateId(id, field = 'id') {
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error(`${field} must be a positive integer`);
   }
 }
 
-// Handle process termination
-let server;
+function validateStatus(status) {
+  if (status !== undefined && !VALID_STATUSES.includes(status)) {
+    throw new Error(`Invalid status: ${status}`);
+  }
+}
+
+function validatePriority(priority) {
+  if (priority !== undefined && !VALID_PRIORITIES.includes(priority)) {
+    throw new Error(`Invalid priority: ${priority}`);
+  }
+}
+
+function textResult(payload) {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(payload, null, 2)
+      }
+    ]
+  };
+}
+
+const tools = [
+  {
+    name: 'create_project',
+    description: 'Create a new project (name, client, description)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Project name' },
+        client: { type: 'string', description: 'Client name (optional)' },
+        description: { type: 'string', description: 'Project description (optional)' }
+      },
+      required: ['name']
+    }
+  },
+  {
+    name: 'list_projects',
+    description: 'List all projects with metadata and counters',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client: { type: 'string', description: 'Filter by client (optional)' }
+      }
+    }
+  },
+  {
+    name: 'delete_project',
+    description: 'Delete a project and all related tasks',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'Project ID to delete' }
+      },
+      required: ['id']
+    }
+  },
+  {
+    name: 'add_task',
+    description: 'Add a new task to a project',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number', description: 'Project ID' },
+        title: { type: 'string', description: 'Short task title' },
+        description: { type: 'string', description: 'Detailed task description (optional)' },
+        priority: { type: 'string', enum: VALID_PRIORITIES },
+        category: { type: 'string', description: 'Task category (optional)' },
+        assignee: { type: 'string', description: 'Task assignee (optional)' },
+        due_date: { type: 'string', description: 'Due date YYYY-MM-DD (optional)' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tags (optional)' },
+        depends_on: { type: 'array', items: { type: 'number' }, description: 'Dependency task IDs (optional)' }
+      },
+      required: ['project_id', 'title']
+    }
+  },
+  {
+    name: 'update_task',
+    description: 'Update fields of a task with history tracking',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'Task ID' },
+        title: { type: 'string', description: 'Task title' },
+        description: { type: 'string', description: 'Task description' },
+        status: { type: 'string', enum: VALID_STATUSES },
+        notes: { type: 'string', description: 'Notes to append with timestamp' },
+        priority: { type: 'string', enum: VALID_PRIORITIES },
+        category: { type: 'string' },
+        assignee: { type: 'string' },
+        due_date: { type: 'string' },
+        tags: { type: 'array', items: { type: 'string' } }
+      },
+      required: ['id']
+    }
+  },
+  {
+    name: 'get_tasks',
+    description: 'Get filtered tasks',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number' },
+        status: { type: 'string', enum: VALID_STATUSES },
+        priority: { type: 'string', enum: VALID_PRIORITIES },
+        category: { type: 'string' },
+        assignee: { type: 'string' },
+        search: { type: 'string' }
+      }
+    }
+  },
+  {
+    name: 'get_task_by_id',
+    description: 'Get full details of a task including dependencies and history',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'Task ID' }
+      },
+      required: ['id']
+    }
+  },
+  {
+    name: 'delete_task',
+    description: 'Delete a task',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'Task ID to delete' }
+      },
+      required: ['id']
+    }
+  },
+  {
+    name: 'get_project_summary',
+    description: 'Get summary statistics of a project including dependency stats',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number', description: 'Project ID' }
+      },
+      required: ['project_id']
+    }
+  },
+  {
+    name: 'add_dependency',
+    description: 'Add a dependency between two tasks (task depends on another task)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'number', description: 'ID of dependent task' },
+        depends_on_task_id: { type: 'number', description: 'ID of dependency task' }
+      },
+      required: ['task_id', 'depends_on_task_id']
+    }
+  },
+  {
+    name: 'remove_dependency',
+    description: 'Remove a dependency between two tasks',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'number', description: 'ID of dependent task' },
+        depends_on_task_id: { type: 'number', description: 'ID of dependency task' }
+      },
+      required: ['task_id', 'depends_on_task_id']
+    }
+  },
+  {
+    name: 'get_blocked_tasks',
+    description: 'Get all tasks blocked by incomplete dependencies',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number', description: 'Optional project filter' }
+      }
+    }
+  },
+  {
+    name: 'get_next_actionable',
+    description: 'Get tasks ready to work on (no incomplete dependencies)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number', description: 'Optional project filter' }
+      }
+    }
+  }
+];
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args = {} } = request.params;
+
+  try {
+    switch (name) {
+      case 'create_project': {
+        const { name: projectName, client = null, description = null } = args;
+        if (!projectName || typeof projectName !== 'string') {
+          throw new Error('name is required');
+        }
+        const projectId = await db.createProject(projectName, client, description);
+        return textResult({ success: true, project_id: projectId, message: `Project "${projectName}" created` });
+      }
+
+      case 'list_projects': {
+        const projects = await db.getProjects(args.client || null);
+        return textResult({ projects });
+      }
+
+      case 'delete_project': {
+        validateId(args.id, 'id');
+        const project = await db.getProject(args.id);
+        if (!project) throw new Error(`Project ${args.id} not found`);
+        await db.deleteProject(args.id);
+        return textResult({ success: true, message: `Project "${project.name}" deleted` });
+      }
+
+      case 'add_task': {
+        const {
+          project_id,
+          title,
+          description = null,
+          priority = 'medium',
+          category = null,
+          assignee = null,
+          due_date = null,
+          tags = null,
+          depends_on = []
+        } = args;
+
+        validateId(project_id, 'project_id');
+        validatePriority(priority);
+        if (!title || typeof title !== 'string') {
+          throw new Error('title is required');
+        }
+
+        const project = await db.getProject(project_id);
+        if (!project) throw new Error(`Project ${project_id} not found`);
+
+        for (const depId of depends_on) {
+          validateId(depId, 'depends_on item');
+        }
+
+        const taskId = await db.addTask(project_id, title, description, priority, category, assignee, due_date, tags, []);
+
+        for (const depId of depends_on) {
+          if (depId === taskId) {
+            throw new Error('A task cannot depend on itself');
+          }
+          const depTask = await db.getTaskById(depId);
+          if (!depTask) {
+            throw new Error(`Dependency task ${depId} not found`);
+          }
+          if (await db.checkForCycle(taskId, depId)) {
+            throw new Error('Adding this dependency would create a cycle');
+          }
+          await db.addDependency(taskId, depId);
+        }
+
+        return textResult({ success: true, task_id: taskId, message: `Task ${taskId} created` });
+      }
+
+      case 'update_task': {
+        validateId(args.id, 'id');
+        validateStatus(args.status);
+        validatePriority(args.priority);
+
+        const current = await db.getTaskById(args.id);
+        if (!current) throw new Error(`Task ${args.id} not found`);
+
+        const updates = {};
+        const mutable = ['title', 'description', 'status', 'priority', 'category', 'assignee', 'due_date', 'tags'];
+        for (const field of mutable) {
+          if (args[field] !== undefined) {
+            updates[field] = args[field];
+          }
+        }
+
+        if (args.notes !== undefined) {
+          const timestamp = new Date().toISOString();
+          const appended = `[${timestamp}] ${args.notes}`;
+          updates.notes = current.notes ? `${current.notes}\n${appended}` : appended;
+        }
+
+        if (updates.status === 'deployed') {
+          const incomplete = await db.getIncompleteDependencies(args.id);
+          if (incomplete.length > 0) {
+            throw new Error(`Cannot set status to deployed: ${incomplete.length} incomplete dependencies`);
+          }
+        }
+
+        const success = await db.updateTask(args.id, updates);
+        if (!success) throw new Error(`Task ${args.id} not found`);
+
+        return textResult({ success: true, message: `Task ${args.id} updated` });
+      }
+
+      case 'get_tasks': {
+        if (args.project_id !== undefined) validateId(args.project_id, 'project_id');
+        validateStatus(args.status);
+        validatePriority(args.priority);
+        const tasks = await db.getTasks(args);
+        return textResult({ tasks });
+      }
+
+      case 'get_task_by_id': {
+        validateId(args.id, 'id');
+        const task = await db.getTaskById(args.id);
+        if (!task) throw new Error(`Task ${args.id} not found`);
+        return textResult(task);
+      }
+
+      case 'delete_task': {
+        validateId(args.id, 'id');
+        const success = await db.deleteTask(args.id);
+        if (!success) throw new Error(`Task ${args.id} not found`);
+        return textResult({ success: true, message: `Task ${args.id} deleted` });
+      }
+
+      case 'get_project_summary': {
+        validateId(args.project_id, 'project_id');
+        const project = await db.getProject(args.project_id);
+        if (!project) throw new Error(`Project ${args.project_id} not found`);
+        const summary = await db.getProjectSummary(args.project_id);
+        return textResult({ project_id: args.project_id, project_name: project.name, summary });
+      }
+
+      case 'add_dependency': {
+        validateId(args.task_id, 'task_id');
+        validateId(args.depends_on_task_id, 'depends_on_task_id');
+        if (args.task_id === args.depends_on_task_id) {
+          throw new Error('A task cannot depend on itself');
+        }
+
+        const task = await db.getTaskById(args.task_id);
+        const depTask = await db.getTaskById(args.depends_on_task_id);
+        if (!task) throw new Error(`Task ${args.task_id} not found`);
+        if (!depTask) throw new Error(`Task ${args.depends_on_task_id} not found`);
+
+        if (await db.dependencyExists(args.task_id, args.depends_on_task_id)) {
+          return textResult({ success: true, message: 'Dependency already exists' });
+        }
+
+        if (await db.checkForCycle(args.task_id, args.depends_on_task_id)) {
+          throw new Error('Adding this dependency would create a cycle');
+        }
+
+        await db.addDependency(args.task_id, args.depends_on_task_id);
+        return textResult({ success: true, message: `Task ${args.task_id} now depends on ${args.depends_on_task_id}` });
+      }
+
+      case 'remove_dependency': {
+        validateId(args.task_id, 'task_id');
+        validateId(args.depends_on_task_id, 'depends_on_task_id');
+        const removed = await db.removeDependency(args.task_id, args.depends_on_task_id);
+        if (!removed) throw new Error('Dependency not found');
+        return textResult({ success: true, message: 'Dependency removed' });
+      }
+
+      case 'get_blocked_tasks': {
+        if (args.project_id !== undefined) validateId(args.project_id, 'project_id');
+        const tasks = await db.getBlockedTasks(args.project_id || null);
+        return textResult({ tasks });
+      }
+
+      case 'get_next_actionable': {
+        if (args.project_id !== undefined) validateId(args.project_id, 'project_id');
+        const tasks = await db.getNextActionable(args.project_id || null);
+        return textResult({ tasks });
+      }
+
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  } catch (error) {
+    return textResult({ success: false, error: error.message });
+  }
+});
 
 process.on('SIGINT', async () => {
-  console.error('Shutting down MCP server...');
-  if (server && server.db) {
-    await server.db.close();
-  }
+  await db.close();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-  console.error('Shutting down MCP server...');
-  if (server && server.db) {
-    await server.db.close();
-  }
+  await db.close();
   process.exit(0);
 });
 
-// Start the MCP server
-server = new MCPServer();
-console.error('MCP Project Tracker Server started');
+const transport = new StdioServerTransport();
+await server.connect(transport);

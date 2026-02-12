@@ -1,7 +1,7 @@
 {
   "name": "mcp-project-tracker",
-  "version": "1.0.0",
-  "description": "MCP server for managing project and task tracking with SQLite persistence and web interface",
+  "version": "3.0.0",
+  "description": "MCP server for project/task tracking with dependencies, history, web UI and SQLite",
   "main": "src/mcp-server.js",
   "type": "module",
   "scripts": {
@@ -28,6 +28,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.4",
     "express": "^4.18.2",

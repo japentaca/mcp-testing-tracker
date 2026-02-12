@@ -186,12 +186,42 @@ class WebServer {
       }
     });
 
+    this.app.get('/api/tasks/blocked', async (req, res) => {
+      try {
+        const projectId = req.query.project_id ? parseInt(req.query.project_id, 10) : null;
+        const tasks = await this.db.getBlockedTasks(projectId);
+        res.json(tasks);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/tasks/actionable', async (req, res) => {
+      try {
+        const projectId = req.query.project_id ? parseInt(req.query.project_id, 10) : null;
+        const tasks = await this.db.getNextActionable(projectId);
+        res.json(tasks);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
     this.app.post('/api/tasks', async (req, res) => {
       try {
-        const { project_id, description, priority = 'medium', category, assignee, due_date } = req.body;
+        const {
+          project_id,
+          title,
+          description = null,
+          priority = 'medium',
+          category,
+          assignee,
+          due_date,
+          tags = null,
+          depends_on = []
+        } = req.body;
 
-        if (!project_id || !description) {
-          return res.status(400).json({ error: 'project_id and description are required' });
+        if (!project_id || !(title || description)) {
+          return res.status(400).json({ error: 'project_id and title are required' });
         }
 
         // Verify project exists
@@ -200,7 +230,28 @@ class WebServer {
           return res.status(404).json({ error: 'Project not found' });
         }
 
-        const id = await this.db.addTask(project_id, description, priority, category, assignee, due_date);
+        const id = await this.db.addTask(
+          project_id,
+          title || description,
+          description,
+          priority,
+          category,
+          assignee,
+          due_date,
+          tags,
+          []
+        );
+
+        for (const depId of depends_on) {
+          if (id === depId) {
+            return res.status(400).json({ error: 'A task cannot depend on itself' });
+          }
+          if (await this.db.checkForCycle(id, depId)) {
+            return res.status(400).json({ error: 'Adding this dependency would create a cycle' });
+          }
+          await this.db.addDependency(id, depId);
+        }
+
         res.status(201).json({
           success: true,
           id,
@@ -220,7 +271,7 @@ class WebServer {
         }
 
         const updates = {};
-        const allowedFields = ['status', 'notes', 'priority', 'category', 'description', 'assignee', 'due_date'];
+        const allowedFields = ['status', 'notes', 'priority', 'category', 'description', 'title', 'assignee', 'due_date', 'tags'];
 
         for (const field of allowedFields) {
           if (req.body[field] !== undefined) {
@@ -241,6 +292,100 @@ class WebServer {
         } else {
           res.status(404).json({ error: 'Task not found' });
         }
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/tasks/:id/detail', async (req, res) => {
+      try {
+        const id = parseInt(req.params.id, 10);
+        if (isNaN(id)) {
+          return res.status(400).json({ error: 'Invalid task ID' });
+        }
+
+        const task = await this.db.getTaskById(id);
+        if (!task) {
+          return res.status(404).json({ error: 'Task not found' });
+        }
+
+        res.json(task);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/tasks/:id/history', async (req, res) => {
+      try {
+        const id = parseInt(req.params.id, 10);
+        if (isNaN(id)) {
+          return res.status(400).json({ error: 'Invalid task ID' });
+        }
+
+        const history = await this.db.getTaskHistory(id, 50);
+        res.json(history);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.get('/api/tasks/:id/dependencies', async (req, res) => {
+      try {
+        const id = parseInt(req.params.id, 10);
+        if (isNaN(id)) {
+          return res.status(400).json({ error: 'Invalid task ID' });
+        }
+
+        const dependencies = await this.db.getTaskDependencies(id);
+        res.json(dependencies);
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.post('/api/tasks/:id/dependencies', async (req, res) => {
+      try {
+        const id = parseInt(req.params.id, 10);
+        const depId = parseInt(req.body.depends_on_task_id, 10);
+
+        if (isNaN(id) || isNaN(depId)) {
+          return res.status(400).json({ error: 'Invalid task IDs' });
+        }
+
+        if (id === depId) {
+          return res.status(400).json({ error: 'A task cannot depend on itself' });
+        }
+
+        if (await this.db.dependencyExists(id, depId)) {
+          return res.status(200).json({ success: true, message: 'Dependency already exists' });
+        }
+
+        if (await this.db.checkForCycle(id, depId)) {
+          return res.status(400).json({ error: 'Adding this dependency would create a cycle' });
+        }
+
+        await this.db.addDependency(id, depId);
+        res.status(201).json({ success: true, message: 'Dependency added' });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    this.app.delete('/api/tasks/:id/dependencies/:depId', async (req, res) => {
+      try {
+        const id = parseInt(req.params.id, 10);
+        const depId = parseInt(req.params.depId, 10);
+
+        if (isNaN(id) || isNaN(depId)) {
+          return res.status(400).json({ error: 'Invalid task IDs' });
+        }
+
+        const removed = await this.db.removeDependency(id, depId);
+        if (!removed) {
+          return res.status(404).json({ error: 'Dependency not found' });
+        }
+
+        res.json({ success: true, message: 'Dependency removed' });
       } catch (error) {
         res.status(500).json({ error: error.message });
       }

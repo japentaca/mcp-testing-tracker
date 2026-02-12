@@ -3,6 +3,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { readFileSync } from 'fs';
 import config from './config.js';
+import { runMigrations } from './migrations.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -46,7 +47,13 @@ class Database {
               return;
             }
             if (!isTestMode) console.log('Database schema initialized');
-            resolve();
+
+            runMigrations(this)
+              .then(() => resolve())
+              .catch((migrationError) => {
+                console.error('Error running migrations:', migrationError.message);
+                reject(migrationError);
+              });
           });
         } catch (error) {
           console.error('Error during database initialization:', error.message);
@@ -155,33 +162,54 @@ class Database {
   }
 
   // Task operations (formerly test_cases)
-  async addTask(projectId, description, priority = 'medium', category = null, assignee = null, dueDate = null) {
+  async addTask(projectId, title, description = null, priority = 'medium', category = null, assignee = null, dueDate = null, tags = null, dependsOn = []) {
+    const normalizedTitle = title || description;
+    const tagsJson = Array.isArray(tags) ? JSON.stringify(tags) : (typeof tags === 'string' ? tags : null);
+
     const sql = `
-      INSERT INTO tasks (project_id, description, priority, category, assignee, due_date, updated_at) 
-      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      INSERT INTO tasks (project_id, title, description, priority, category, assignee, due_date, tags, updated_at) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     `;
-    const result = await this.run(sql, [projectId, description, priority, category, assignee, dueDate]);
+    const result = await this.run(sql, [projectId, normalizedTitle, description, priority, category, assignee, dueDate, tagsJson]);
+    const taskId = result.id;
+
+    for (const depId of dependsOn) {
+      await this.addDependency(taskId, depId);
+    }
 
     // Update project timestamp
     await this.run('UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [projectId]);
 
-    return result.id;
+    return taskId;
   }
 
   async updateTask(id, updates = {}) {
-    const allowedFields = ['status', 'notes', 'priority', 'category', 'description', 'assignee', 'due_date'];
+    const current = await this.get('SELECT * FROM tasks WHERE id = ?', [id]);
+    if (!current) return false;
+
+    const allowedFields = ['status', 'notes', 'priority', 'category', 'description', 'title', 'assignee', 'due_date', 'tags'];
     const setClause = [];
     const params = [];
 
     for (const [field, value] of Object.entries(updates)) {
       if (allowedFields.includes(field)) {
+        const finalValue = field === 'tags' && Array.isArray(value) ? JSON.stringify(value) : value;
         setClause.push(`${field} = ?`);
-        params.push(value);
+        params.push(finalValue);
+
+        const oldValue = current[field];
+        if (String(oldValue) !== String(finalValue)) {
+          await this.addHistory(id, field, oldValue, finalValue);
+        }
       }
     }
 
     if (setClause.length === 0) {
       throw new Error('No valid fields to update');
+    }
+
+    if (updates.status === 'deployed' && current.status !== 'deployed') {
+      setClause.push('completed_at = CURRENT_TIMESTAMP');
     }
 
     setClause.push('updated_at = CURRENT_TIMESTAMP');
@@ -229,14 +257,26 @@ class Database {
     }
 
     if (filters.search) {
-      sql += ' AND (description LIKE ? OR notes LIKE ?)';
+      sql += ' AND (title LIKE ? OR description LIKE ? OR notes LIKE ?)';
       const searchTerm = `%${filters.search}%`;
-      params.push(searchTerm, searchTerm);
+      params.push(searchTerm, searchTerm, searchTerm);
     }
 
     sql += ' ORDER BY created_at DESC';
 
-    return await this.all(sql, params);
+    const tasks = await this.all(sql, params);
+
+    for (const task of tasks) {
+      task.tags = task.tags ? JSON.parse(task.tags) : [];
+      task.incomplete_dependencies = await this.getIncompleteDependencies(task.id);
+      task.blocking_tasks = task.incomplete_dependencies;
+      task.is_blocked_by_dependencies = task.incomplete_dependencies.length > 0;
+      if (!task.title) {
+        task.title = task.description || `Task #${task.id}`;
+      }
+    }
+
+    return tasks;
   }
 
   async deleteTask(id) {
@@ -273,12 +313,189 @@ class Database {
     `;
 
     const summary = await this.get(sql, [projectId]);
+    const dependencyStats = await this.getDependencyStats(projectId);
 
     // Calculate completion percentage (deployed = completed)
     summary.completion_percentage = summary.total > 0 ? Math.round((summary.deployed / summary.total) * 100) : 0;
     summary.progress_percentage = summary.total > 0 ? Math.round(((summary.developed + summary.tested + summary.deployed) / summary.total) * 100) : 0;
+    summary.dependency_stats = dependencyStats;
 
     return summary;
+  }
+
+  async addDependency(taskId, dependsOnTaskId) {
+    const sql = 'INSERT INTO dependencies (task_id, depends_on_task_id) VALUES (?, ?)';
+    return await this.run(sql, [taskId, dependsOnTaskId]);
+  }
+
+  async removeDependency(taskId, dependsOnTaskId) {
+    const sql = 'DELETE FROM dependencies WHERE task_id = ? AND depends_on_task_id = ?';
+    const result = await this.run(sql, [taskId, dependsOnTaskId]);
+    return result.changes > 0;
+  }
+
+  async getTaskDependencies(taskId) {
+    const sql = `
+      SELECT t.* FROM tasks t
+      JOIN dependencies d ON t.id = d.depends_on_task_id
+      WHERE d.task_id = ?
+    `;
+    return await this.all(sql, [taskId]);
+  }
+
+  async getDependencyIds(taskId) {
+    const sql = 'SELECT depends_on_task_id FROM dependencies WHERE task_id = ?';
+    const rows = await this.all(sql, [taskId]);
+    return rows.map((row) => row.depends_on_task_id);
+  }
+
+  async getIncompleteDependencies(taskId) {
+    const sql = `
+      SELECT t.id, t.title, t.status
+      FROM dependencies d
+      JOIN tasks t ON d.depends_on_task_id = t.id
+      WHERE d.task_id = ? AND t.status NOT IN ('deployed', 'tested')
+    `;
+    return await this.all(sql, [taskId]);
+  }
+
+  async checkForCycle(taskId, dependsOnTaskId) {
+    const visited = new Set();
+    const stack = [dependsOnTaskId];
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current === taskId) return true;
+      if (visited.has(current)) continue;
+      visited.add(current);
+
+      const deps = await this.all('SELECT depends_on_task_id FROM dependencies WHERE task_id = ?', [current]);
+      for (const dep of deps) {
+        stack.push(dep.depends_on_task_id);
+      }
+    }
+
+    return false;
+  }
+
+  async dependencyExists(taskId, dependsOnTaskId) {
+    const sql = 'SELECT 1 FROM dependencies WHERE task_id = ? AND depends_on_task_id = ?';
+    const existing = await this.get(sql, [taskId, dependsOnTaskId]);
+    return !!existing;
+  }
+
+  async addHistory(taskId, field, oldValue, newValue) {
+    const sql = `
+      INSERT INTO history (task_id, field, old_value, new_value)
+      VALUES (?, ?, ?, ?)
+    `;
+    return await this.run(sql, [taskId, field, oldValue, newValue]);
+  }
+
+  async getTaskHistory(taskId, limit = 50) {
+    const sql = `
+      SELECT * FROM history
+      WHERE task_id = ?
+      ORDER BY changed_at DESC
+      LIMIT ?
+    `;
+    return await this.all(sql, [taskId, limit]);
+  }
+
+  async getTaskById(taskId) {
+    const task = await this.get('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (!task) return null;
+
+    task.dependencies = await this.getDependencyIds(taskId);
+    task.incomplete_dependencies = await this.getIncompleteDependencies(taskId);
+    task.history = await this.getTaskHistory(taskId, 20);
+    task.tags = task.tags ? JSON.parse(task.tags) : [];
+    if (!task.title) {
+      task.title = task.description || `Task #${task.id}`;
+    }
+
+    return task;
+  }
+
+  async getBlockedTasks(projectId = null) {
+    let sql = `
+      SELECT DISTINCT t.* FROM tasks t
+      JOIN dependencies d ON t.id = d.task_id
+      JOIN tasks dep ON d.depends_on_task_id = dep.id
+      WHERE dep.status NOT IN ('deployed', 'tested')
+        AND t.status NOT IN ('deployed')
+    `;
+    const params = [];
+
+    if (projectId) {
+      sql += ' AND t.project_id = ?';
+      params.push(projectId);
+    }
+
+    sql += ' ORDER BY t.created_at ASC';
+
+    const tasks = await this.all(sql, params);
+    for (const task of tasks) {
+      task.blocking_tasks = await this.getIncompleteDependencies(task.id);
+      task.tags = task.tags ? JSON.parse(task.tags) : [];
+      if (!task.title) {
+        task.title = task.description || `Task #${task.id}`;
+      }
+    }
+
+    return tasks;
+  }
+
+  async getNextActionable(projectId = null) {
+    let sql = `
+      SELECT t.* FROM tasks t
+      WHERE t.status IN ('pending', 'in-progress', 'blocked')
+        AND t.id NOT IN (
+          SELECT DISTINCT d.task_id FROM dependencies d
+          JOIN tasks dep ON d.depends_on_task_id = dep.id
+          WHERE dep.status NOT IN ('deployed', 'tested')
+        )
+    `;
+    const params = [];
+
+    if (projectId) {
+      sql += ' AND t.project_id = ?';
+      params.push(projectId);
+    }
+
+    sql += ` ORDER BY
+      CASE t.priority
+        WHEN 'critical' THEN 1
+        WHEN 'high' THEN 2
+        WHEN 'medium' THEN 3
+        WHEN 'low' THEN 4
+      END,
+      t.created_at ASC`;
+
+    const tasks = await this.all(sql, params);
+    return tasks.map((task) => ({
+      ...task,
+      tags: task.tags ? JSON.parse(task.tags) : [],
+      title: task.title || task.description || `Task #${task.id}`
+    }));
+  }
+
+  async getDependencyStats(projectId) {
+    const totalRow = await this.get(`
+      SELECT COUNT(*) as total_dependencies
+      FROM dependencies d
+      JOIN tasks t ON t.id = d.task_id
+      WHERE t.project_id = ?
+    `, [projectId]);
+
+    const blockedTasks = await this.getBlockedTasks(projectId);
+    const actionableTasks = await this.getNextActionable(projectId);
+
+    return {
+      total_dependencies: totalRow?.total_dependencies || 0,
+      blocked_tasks: blockedTasks.length,
+      actionable_tasks: actionableTasks.length
+    };
   }
 
   // Get unique assignees for filtering

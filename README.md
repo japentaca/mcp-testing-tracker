@@ -1,247 +1,102 @@
 # MCP Project Tracker
 
-Servidor MCP (Model Context Protocol) para gestionar **proyectos y tareas** con persistencia SQLite, API REST e interfaz web.
+Proyecto en desarrollo para gestión de proyectos y tareas con servidor MCP, API REST y UI web sobre SQLite.
 
-## 🚀 Características
+## Estado
 
-- Servidor MCP por `stdio`.
-- Base de datos SQLite con esquema simple y eficiente.
-- API REST para proyectos y tareas.
-- UI web (HTML/CSS/JavaScript vanilla).
-- Estados de tarea: `pending`, `in-progress`, `developed`, `tested`, `deployed`, `blocked`.
-- Prioridades: `low`, `medium`, `high`, `critical`.
-- Filtros por estado, prioridad, categoría, responsable y texto.
-- Campos extra de seguimiento: `assignee` y `due_date`.
+Uso local / desarrollo. No orientado a producción en esta etapa.
 
-## 📁 Estructura
+## Stack
 
-```text
-mcp-project-tracker/
-├── package.json
-├── README.md
-├── src/
-│   ├── mcp-server.js
-│   ├── web-server.js
-│   ├── database.js
-│   └── schema.sql
-├── public/
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
-└── scripts/
-    └── mcp-smoke-test.js
-```
+- MCP server por `stdio` usando `@modelcontextprotocol/sdk`
+- API web con Express
+- Persistencia con SQLite (`sqlite3`)
+- Frontend vanilla (`public/`)
 
-## 🛠️ Instalación
+## Instalación
 
 ```bash
 npm install
 ```
 
-La base de datos se crea automáticamente al iniciar cualquiera de los servidores.
-
-## ▶️ Ejecución
-
-### Servidor MCP
+## Scripts
 
 ```bash
-npm run start:mcp
+npm run start:mcp        # Inicia solo el servidor MCP
+npm run start:web        # Inicia web en puerto por defecto (3000)
+npm run start:web:3001   # Inicia web en puerto 3001
+npm run start:web:8080   # Inicia web en puerto 8080
+npm run dev              # MCP + web (3000)
+npm run dev:3001         # MCP + web (3001)
 ```
 
-### Servidor Web
+## Tests
 
 ```bash
-npm run start:web
-# o
-npm run start:web:3001
-npm run start:web:8080
+npm test                 # Jest (unit tests)
+npm run test:mcp         # Smoke test MCP end-to-end
 ```
 
-UI: `http://localhost:3000` (o el puerto que uses).
+## MCP Tools (13)
 
-### Ambos en desarrollo
+1. `create_project`
+2. `list_projects`
+3. `delete_project`
+4. `add_task`
+5. `update_task`
+6. `get_tasks`
+7. `get_task_by_id`
+8. `delete_task`
+9. `get_project_summary`
+10. `add_dependency`
+11. `remove_dependency`
+12. `get_blocked_tasks`
+13. `get_next_actionable`
 
-```bash
-npm run dev
-# o
-npm run dev:3001
-```
-
-## ✅ Tests
-
-### Tests unitarios (Jest)
-
-```bash
-npm test
-```
-
-### Smoke test MCP real (cliente MCP por stdio)
-
-Este test levanta el servidor MCP y ejecuta un flujo real JSON-RPC:
-- `initialize`
-- `tools/list`
-- `create_project`
-- `add_task`
-- `update_task`
-- `get_tasks`
-- `get_project_summary`
-- `delete_task`
-- `delete_project`
-
-```bash
-npm run test:mcp
-```
-
-## 🌐 API REST
-
-### Proyectos
-
-- `GET /api/projects` — listar proyectos.
-- `POST /api/projects` — crear proyecto.
-- `PUT /api/projects/:id` — actualizar proyecto.
-- `DELETE /api/projects/:id` — eliminar proyecto.
-
-### Tareas
-
-- `GET /api/tasks` — listar tareas (con filtros).
-- `POST /api/tasks` — crear tarea.
-- `PUT /api/tasks/:id` — actualizar tarea.
-- `DELETE /api/tasks/:id` — eliminar tarea.
-
-### Resumen
-
-- `GET /api/summary/:project_id` — estadísticas del proyecto.
+## API REST
 
 ### Health
 
-- `GET /api/health` — estado del servicio.
+- `GET /api/health`
 
-### Filtros disponibles en `GET /api/tasks`
+### Proyectos
 
-- `project_id`
-- `status`
-- `priority`
-- `category`
-- `assignee`
-- `search`
+- `GET /api/projects`
+- `POST /api/projects`
+- `PUT /api/projects/:id`
+- `DELETE /api/projects/:id`
 
-## 🤖 Herramientas MCP
+### Tareas
 
-El servidor expone estas herramientas:
+- `GET /api/tasks`
+- `POST /api/tasks`
+- `PUT /api/tasks/:id`
+- `DELETE /api/tasks/:id`
+- `GET /api/tasks/:id/detail`
+- `GET /api/tasks/:id/history`
 
-- `create_project`
-- `list_projects`
-- `add_task`
-- `update_task`
-- `get_tasks`
-- `get_project_summary`
-- `delete_task`
-- `delete_project`
+### Dependencias
 
-### Esquema resumido de parámetros
+- `GET /api/tasks/:id/dependencies`
+- `POST /api/tasks/:id/dependencies`
+- `DELETE /api/tasks/:id/dependencies/:depId`
 
-#### `create_project`
-- `name` (requerido)
-- `client` (opcional)
-- `description` (opcional)
+### Consultas avanzadas
 
-#### `list_projects`
-- `client` (opcional)
+- `GET /api/tasks/blocked?project_id=<id>`
+- `GET /api/tasks/actionable?project_id=<id>`
 
-#### `add_task`
-- `project_id` (requerido)
-- `description` (requerido)
-- `priority` (opcional)
-- `category` (opcional)
-- `assignee` (opcional)
-- `due_date` (opcional, `YYYY-MM-DD`)
+### Resumen
 
-#### `update_task`
-- `id` (requerido)
-- `status` (opcional)
-- `notes` (opcional)
-- `priority` (opcional)
-- `category` (opcional)
-- `description` (opcional)
-- `assignee` (opcional)
-- `due_date` (opcional, `YYYY-MM-DD`)
+- `GET /api/summary/:project_id`
 
-#### `get_tasks`
-- `project_id` (opcional)
-- `status` (opcional)
-- `priority` (opcional)
-- `category` (opcional)
-- `assignee` (opcional)
-- `search` (opcional)
+## Modelo de tarea
 
-#### `get_project_summary`
-- `project_id` (requerido)
+Campos principales en `tasks`:
 
-#### `delete_task`
-- `id` (requerido)
-
-#### `delete_project`
-- `id` (requerido)
-
-## ⚙️ Configuración MCP en VS Code
-
-Agrega esto a tu configuración JSON de usuario:
-
-```json
-{
-  "github.copilot.chat.mcp.servers": {
-    "project-tracker": {
-      "command": "node",
-      "args": ["c:\\ruta\\completa\\al\\proyecto\\src\\mcp-server.js"],
-      "env": {}
-    }
-  }
-}
-```
-
-Notas:
-- En Windows usa `\\` en rutas o `/`.
-- Reinicia VS Code tras cambiar la configuración.
-
-## 🗃️ Modelo de datos
-
-### Tabla `projects`
-- `id`
-- `name`
-- `client`
-- `description`
-- `created_at`
-- `updated_at`
-
-### Tabla `tasks`
-- `id`
-- `project_id` (FK a `projects.id`)
-- `description`
-- `priority`
-- `status`
-- `category`
-- `assignee`
-- `due_date`
-- `notes`
-- `created_at`
-- `updated_at`
-
-Índices principales:
-- `idx_tasks_project`
-- `idx_tasks_status`
-- `idx_tasks_priority`
-- `idx_tasks_category`
-- `idx_tasks_assignee`
-- `idx_tasks_due_date`
-
-## 🧪 Ejemplos de prompts (Copilot Chat)
-
-- "Crea un proyecto llamado Portal de Ventas para el cliente ACME"
-- "Agrega una tarea de prioridad high para implementar autenticación"
-- "Muéstrame todas las tareas blocked del proyecto 1"
-- "Marca la tarea 5 como tested"
-- "Dame un resumen del proyecto 1"
-
----
-
-Proyecto listo para seguimiento de ciclo completo: planificación, desarrollo, validación y despliegue.
+- `id`, `project_id`
+- `title`, `description`
+- `priority`, `status`
+- `category`, `assignee`, `due_date`
+- `tags`, `notes`, `completed_at`
+- `created_at`, `updated_at`
